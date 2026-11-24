@@ -130,131 +130,151 @@ SvirisTel получает и обрабатывает сегмент данны
 
 Непрерывный доступ к сегментам данных реализуется с применением виртуальной конкатенации, преобразуя его в виртуальный PDU
 
+соглашения:
+- Кадр имеет вид 00 | COBS(PDU) | 00.
+- PDU[0] — заглушка (0x00) под первый OHB. Контракт: pdu_size ≥ 1 и pdu_data(0) == 0.
+- Позиция pdu_size — виртуальный ноль, терминатор последнего блока. Он никогда не копируется в буфер.
+- Окно — это диапазон [pdu_window_start, pdu_window_end). Его размер равен min(свободное место в сегменте, остаток PDU). Окно не может выйти за pdu_size.
+- segment_end — число записанных байт в буфере.
+
 данные:
 
 ``` c
-pdu_data 		  // виртуальный PDU (виртуальная конкатенация HEAD, SDU, TRAIL)
-frame_segment // буфер кодирования сегмента кадра
+pdu_data(pos)            // виртуальная конкатенация HEAD|SDU|TRAIL
+frame_segment[segment_size]
 
-pdu_size 			      // длинна виртуального PDU
-pdu_window_start 	  // указывает на начало рабочей области в PDU
-pdu_window_end 	    // указывает на следующий за последним байтом рабочей области PDU
-segment_size        // полный размер буфера кодирования (константа)
-segment_end         // указатель на конец буфера сегмента (следующий байт за последним записанным)
+pdu_size
+pdu_window_start         // первый ещё не скопированный байт PDU
+pdu_window_end           // конец окна (не включая)
+segment_size             // константа, >= 2 (лучше >= 3)
+segment_end              // число записанных байт буфера
 
-// размер окна всегда соответствует размеру оставшегося свободного пространства frame_segment
-// или остатку pdu_data, если он меньше остатка буфера сегмента
-// а позиция окна всегда указывает на начало еще не копированных в буфер сегмента данных
-
-ohb_pos   // позиция Overhead byte в PDU, который требуется установить
-ohb_val   // значение которое требуется установить
+ohb_pos                  // позиция PDU, где должен стоять очередной OHB
+insert_mode              // false: в ohb_pos лежит ноль (placeholder или данные 0x00), OHB его заменяет
+                         // true: в ohb_pos данные, OHB нужно вставить перед ними (после кода 0xFF)
 ```
 
-функции:
+примитивы:
 
 ``` c
-set_window_end(value)
-  pdu_window_end = value
-  if( pdu_window_end > pdu_size ) 
-    pdu_window_end = pdu_size + 1
+// окно = свободное место в буфере, но не дальше конца PDU
+update_window_end()
+  pdu_window_end = min(pdu_window_start + (segment_size - segment_end), pdu_size)
 
-// возвращает смещение искомого символа относительно start (поиск начинается со start)
-// если искомый символ на расстоянии > 0xFF или отсутствует то возвращается 0xFF
-find_in_pdu(start, symbol) 
+// расстояние от позиции кода base до ближайшего нуля (или конца PDU),
+// просмотр base+1 .. base+254; если не найдено, то 0xFF
+// результат всегда лежит в 1..0xFF
+find_in_pdu(base):
+  for i = base+1 .. base+254:
+    if i == pdu_size or pdu_data(i) == 0:
+      return i - base
+  return 0xFF
+// реализация: memchr по кускам HEAD/SDU/TRAIL с лимитом 254 байта
 
-// возвращает байт данных из pdu
-pdu_data(pos)
-
-// проверить на завершенность копирования pdu
 is_end_of_pdu()
-  pdu_window_start >= pdu_size
+  return pdu_window_start >= pdu_size
 
-// копировать часть данных из начала рабочего окна PDU в конец буфера сегмента
-copy_from_pdu(length) 
-  segment_end += length
-  pdu_window_start += length
-  set_window_end(pdu_window_start + (segment_size - segment_end + 1))
-
-// копировать все окно в буфер
+// копировать всё окно в буфер
 copy_window()
-  segment_end = segment_size
-  pdu_window_start = pdu_window_end
+  segment_end      += pdu_window_end - pdu_window_start
+  pdu_window_start  = pdu_window_end
 
-// вернуть старт окна назад (pdu_pos < pdu_window_end)
+// вернуть старт окна назад (pdu_pos < pdu_window_start, байт уже в буфере)
 reset_window_start_to(pdu_pos)
-  segment_end = map_pdu_pos_to_segment(pdu_pos)
+  segment_end      = map_pdu_pos_to_segment(pdu_pos)
   pdu_window_start = pdu_pos
-  
+  // pdu_window_end пересчитает следующий write_byte_to_segment
 
-// переносит позицию байта PDU на позицию в буфере сегмента опираясь на рабочее окно (-1 - вне диапазона буфера)
-map_pdu_pos_to_segment(pdu_pos) return segment_pos 
-  segment_end + (pdu_pos - pdu_window_start)
+// допустимо для pdu_pos в текущем сегменте, после последней вставки
+map_pdu_pos_to_segment(pdu_pos)
+  return segment_end + (pdu_pos - pdu_window_start)     // знаковая арифметика
 
-// переносит позицию байта буфера сегмента на позицию в PDU опираясь на рабочее окно (-1 - вне диапазона PDU)
-map_segment_pos_to_pdu(segment_pos) return pdu_pos 
-  pdu_window_start + (segment_pos - segment_end)
-
-// записывает указанный байт в конец буфера сегмента
-write_byte_to_segment(byte) 
+write_byte_to_segment(byte)
+  frame_segment[segment_end] = byte
   segment_end += 1
-  set_window_end(pdu_window_start + (segment_size - segment_end + 1))
+  update_window_end()
 
-// устанавливает указанный байт в буфер сегмента на указанную позицию (не влияет на segment_end)
-set_byte_to_segment(pos, byte) 
+set_byte_to_segment(pos, byte)       // segment_end не меняется
+  frame_segment[pos] = byte
 
-// отправить сегмент в пользовательский контекст для передачи в сеть
-flush_segment() 
+flush_segment()
+  send(frame_segment, segment_end)   // см. замечание о владении буфером
   segment_end = 0
-  set_window_end(pdu_window_start + segment_size)
-
-// функция кодирования сегмента
-encode_segment()
-  copy_window()
-  while(1):
-    if ( ohb_pos >= pdu_window_end ) // текущий сегмент полностью закодирован
-      break;
-
-    ohb_val = find_in_pdu(ohb_pos+1, 0x00)
-
-    if ( pdu_data(ohb_pos) == 0 )
-      //заменяем 0
-      set_byte_to_segment(map_pdu_pos_to_segment(ohb_pos)), ohb_val)
-    else:
-      //врезаем OHB в буфер между двумя кусками PDU
-      reset_window_start_to(ohb_pos)    
-      write_byte_to_segment(ohb_val)
-      copy_window()
-
-    ohb_pos += ohb_val
+  update_window_end()
 ```
+
+кодирование сегмента:
+
+```c
+encode_segment()
+  copy_window()                                  // сначала всё окно копируется как есть
+
+  while (ohb_pos < pdu_window_end)               // байт ohb_pos уже в буфере сегмента
+                                                 // (при ohb_pos == pdu_size цикл тоже заканчивается)
+    if (!insert_mode)
+      base = ohb_pos                             // в ohb_pos лежит ноль
+    else
+      base = ohb_pos - 1                         // «виртуальный» код стоит перед ohb_pos
+
+    ohb_val = find_in_pdu(base)                  // 1..0xFF
+
+    if (!insert_mode)
+      // заменяем ноль на код
+      set_byte_to_segment(map_pdu_pos_to_segment(ohb_pos), ohb_val)
+    else
+      // врезаем код между двумя кусками PDU
+      reset_window_start_to(ohb_pos)
+      write_byte_to_segment(ohb_val)             // место есть: байт ohb_pos был в буфере
+      copy_window()                              // докопировать то, что теперь помещается
+
+    ohb_pos    = base + ohb_val                  // позиция следующего кода
+    insert_mode = (ohb_val == 0xFF)              // после 0xFF следующего нуля нет, код вставляется
+```
+
+Если после кода 0xFF ohb_pos == pdu_size, цикл закончится сам. Лишний код не вставляется.
+Если ohb_pos == pdu_window_end и буфер полон, вставка откладывается. Код встанет первым байтом следующего сегмента.
 
 основная программа:
 
 ``` c
-// машина состояний выполнения программы потокового кодирования с микробатчингом
-switch(state):
-IDLE: noop()
-START:
-  pdu_window_start = 0
-  ohb_pos = 0
-  write_byte_to_segment(0x00)       // 0 в начале кадра
-  //PDU гарантированно содержит в начале 0x00 для установки первого OHB
-  // поэтому ohb_pos == 0 всегда валиден
-  encode_segment()
-  flush_segment()
-  state = SVT_CONTINUE
-  
-CONTINUE:
-  encode_segment()
-  if (is_end_of_pdu()): 
-    if(segment_end <= segment_size): write_byte_to_segment(0x00)
-    else: state = SVT_END
-  flush_segment()
+init(pdu, segment_size):
+  state = START
 
-END:
-  write_byte_to_segment(0x00)
-  flush_segment()
-  state = IDLE
+step():                            // один вызов = один отправленный сегмент
+  switch (state):
+
+  IDLE:
+    noop()
+
+  START:
+    segment_end      = 0
+    pdu_window_start = 0
+    ohb_pos          = 0
+    insert_mode      = false
+    update_window_end()
+    write_byte_to_segment(0x00)    // начальный разделитель кадра
+    state = CONTINUE
+    goto CONTINUE_BODY             // PDU может поместиться в первый же сегмент
+
+  CONTINUE:
+  CONTINUE_BODY:
+    encode_segment()
+
+    if (is_end_of_pdu() and ohb_pos >= pdu_size)   // PDU скопирован и все OHB расставлены
+      if (segment_end < segment_size)
+        write_byte_to_segment(0x00)                // конечный разделитель влез
+        flush_segment()
+        state = IDLE
+      else
+        flush_segment()                            // буфер полон, разделитель уйдёт следующим
+        state = END
+    else
+      flush_segment()
+
+  END:
+    write_byte_to_segment(0x00)
+    flush_segment()
+    state = IDLE
 ```
 
 ### Обработка исключений
