@@ -132,11 +132,79 @@ SvirisTel может обрабатыввать как кадры целиком
 
 ### Публичные типы данных
 
-TODO
+```c
+// структура контекста
+typedef struct {
+    struct {
+        uint8_t header[4];         // {OHB, PID, SDL_H, SDL_L}
+        uint8_t* sdu;              // указатель на передаваемые данные
+        uint8_t trailer[2];        // {CRC_H, CRC_L}
+       
+        // подструктура непрерывного доступа к данным
+        struct {
+            const uint8_t* ptr[3]; // Указатели на данные
+            size_t         len[3]; // Длины каждого сегмента
+            size_t         off[4]; // Накопленные смещения: [0, len0, len0+len1, total]
+        } pdu_vbuf;
+
+        uint32_t window_start;     // первый ещё не скопированный байт PDU
+        uint32_t window_end;       // конец окна (не включая)
+        uint32_t ohb_pos;          // позиция в PDU, где должен стоять очередной OHB
+        bool insert_mode;          // false: в ohb_pos лежит ноль (placeholder или данные 0x00), OHB его заменяет
+                              // true: в ohb_pos данные, OHB нужно вставить перед ними (после кода 0xFF)
+    } tx;
+    
+    struct {
+        bool in_frame;      // 1 — идёт приём кадра, 0 — ожидание разделителя (синхронизация)
+        bool ohb_forced;    //следующий OHB форсированный (вставлен в разрез PDU, не заменяет 0)
+        uint8_t pid;
+        uint16_t sdl;
+        uint16_t crc;
+        uint32_t ohb_pos;   //позиция следующего OHB относительно начала обрабатываемого сегмента
+    } rx;
+} svt_ctx_t;
+
+
+// структура указателей на обработчики колбэков
+typedef struct {
+    // Отправка данных в физический интерфейс
+    void (*on_tx_write) (svt_ctx* ctx, uint8_t* data, uint32_t size);
+    // Завершение передачи с кодом результата
+    void (*on_tx_end) (svt_ctx* ctx, uint8_t result);
+    
+    // Уведомление о начале приёма кадра
+    void (*on_rx_start) (svt_ctx* ctx, uint8_t id, uint16_t length);
+    // Осуществлен прием данных
+    void (*on_rx_data) (svt_ctx* ctx, uint8_t* data, uint32_t size);
+    // Завершен приём кадра
+    void (*on_rx_end) (svt_ctx* ctx, uint8_t result);
+} svt_cb_t;
+
+ 
+```
 
 ### Публичные функции
 
-TODO
+``` c
+// Инициализировать контекст
+void svt_init(svt_ctx* ctx, svt_cb* callbacks);
+
+// Принудительно прекратить процесс передачи данных
+void svt_reset_tx(svt_ctx* ctx);
+
+// Передать данные в сеть
+void svt_tx(svt_ctx* ctx, uint8_t id, uint8_t* payload, uint16_t size);
+
+// Принудительно прекратить процесс приема кадра
+void svt_reset_rx(svt_ctx* ctx);
+
+// Отбработать принятый сегмент потока из сети
+void svt_rx(svt_ctx* ctx, uint8_t* segment, uint32_t size);
+
+// Опросить состояние
+void svt_poll(svt_ctx* ctx);
+```
+
 
 ### Пример использования
 
