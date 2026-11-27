@@ -133,6 +133,21 @@ SvirisTel может обрабатыввать как кадры целиком
 ### Публичные типы данных
 
 ```c
+// структура указателей на обработчики колбэков
+typedef struct {
+    // Отправка данных в физический интерфейс
+    void (*on_tx_write) (svt_ctx* ctx, uint8_t* data, uint32_t size);
+    // Завершение передачи с кодом результата
+    void (*on_tx_end) (svt_ctx* ctx, uint8_t result);
+    
+    // Уведомление о начале приёма кадра
+    void (*on_rx_start) (svt_ctx* ctx, uint8_t id, uint16_t length);
+    // Осуществлен прием данных
+    void (*on_rx_data) (svt_ctx* ctx, uint8_t* data, uint32_t size);
+    // Завершен приём кадра
+    void (*on_rx_end) (svt_ctx* ctx, uint8_t result);
+} svt_cb_t;
+
 // структура контекста
 typedef struct {
     struct {
@@ -151,7 +166,7 @@ typedef struct {
         uint32_t window_end;       // конец окна (не включая)
         uint32_t ohb_pos;          // позиция в PDU, где должен стоять очередной OHB
         bool insert_mode;          // false: в ohb_pos лежит ноль (placeholder или данные 0x00), OHB его заменяет
-                              // true: в ohb_pos данные, OHB нужно вставить перед ними (после кода 0xFF)
+                                   // true: в ohb_pos данные, OHB нужно вставить перед ними (после кода 0xFF)
     } tx;
     
     struct {
@@ -162,25 +177,9 @@ typedef struct {
         uint16_t crc;
         uint32_t ohb_pos;   //позиция следующего OHB относительно начала обрабатываемого сегмента
     } rx;
+
+    svt_cb_t cb; // колбэки
 } svt_ctx_t;
-
-
-// структура указателей на обработчики колбэков
-typedef struct {
-    // Отправка данных в физический интерфейс
-    void (*on_tx_write) (svt_ctx* ctx, uint8_t* data, uint32_t size);
-    // Завершение передачи с кодом результата
-    void (*on_tx_end) (svt_ctx* ctx, uint8_t result);
-    
-    // Уведомление о начале приёма кадра
-    void (*on_rx_start) (svt_ctx* ctx, uint8_t id, uint16_t length);
-    // Осуществлен прием данных
-    void (*on_rx_data) (svt_ctx* ctx, uint8_t* data, uint32_t size);
-    // Завершен приём кадра
-    void (*on_rx_end) (svt_ctx* ctx, uint8_t result);
-} svt_cb_t;
-
- 
 ```
 
 ### Публичные функции
@@ -198,8 +197,8 @@ void svt_tx(svt_ctx* ctx, uint8_t id, uint8_t* payload, uint16_t size);
 // Принудительно прекратить процесс приема кадра
 void svt_reset_rx(svt_ctx* ctx);
 
-// Отбработать принятый сегмент потока из сети
-void svt_rx(svt_ctx* ctx, uint8_t* segment, uint32_t size);
+// Обработать принятый сегмент потока байт из сети (вернет количество потребленныйх байт сегмента)
+size_t svt_rx(svt_ctx* ctx, uint8_t* segment, size_t size);
 
 // Опросить состояние
 void svt_poll(svt_ctx* ctx);
